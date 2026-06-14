@@ -70,12 +70,12 @@ def init_db() -> None:
     conn.close()
 
 
-def insertar_registro(hora: str, t1: float, t2: float, t3: float, t4: float) -> None:
-    """Inserta un nuevo registro con fecha automática y hora manual."""
+def insertar_registro(fecha: str, hora: str, t1: float, t2: float, t3: float, t4: float) -> None:
+    """Inserta un nuevo registro con fecha y hora seleccionadas."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         "INSERT INTO registros (fecha, hora, temp_motor_1, temp_motor_2, temp_motor_3, temp_motor_4) VALUES (?, ?, ?, ?, ?, ?)",
-        (datetime.now().strftime("%Y-%m-%d"), hora, t1, t2, t3, t4),
+        (fecha, hora, t1, t2, t3, t4),
     )
     conn.commit()
     conn.close()
@@ -137,10 +137,10 @@ st.markdown('<p class="sub-header">Registro y seguimiento de temperaturas operat
 with st.container():
     st.subheader("Registrar lecturas")
 
-    # Fecha automática + Hora escrita manualmente
+    # Fecha seleccionable + Hora escrita manualmente
     col_fecha, col_hora = st.columns(2)
     with col_fecha:
-        st.text_input("📅 Fecha (automática)", value=datetime.now().strftime("%Y-%m-%d"), disabled=True)
+        fecha_sel = st.date_input("📅 Fecha", value=datetime.now().date())
     with col_hora:
         hora_sel = st.text_input("🕐 Hora (HH:MM)", value=datetime.now().strftime("%H:%M"), max_chars=5)
 
@@ -165,7 +165,7 @@ with st.container():
                 st.error("❌ Hora fuera de rango. Horas: 0-23, Minutos: 0-59")
             else:
                 hora_formateada = f"{h:02d}:{m:02d}"
-                insertar_registro(hora_formateada, temp1, temp2, temp3, temp4)
+                insertar_registro(fecha_sel.strftime("%Y-%m-%d"), hora_formateada, temp1, temp2, temp3, temp4)
                 st.success("✅ Lectura registrada y guardada en base de datos.")
 
                 # Advertencia si alguna temperatura supera 100 °C
