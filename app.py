@@ -16,6 +16,20 @@ import os
 from datetime import datetime, date
 from io import BytesIO
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
+
+# Zona horaria de Colombia (UTC-5)
+TZ_COL = ZoneInfo("America/Bogota")
+
+
+def ahora() -> datetime:
+    """Retorna la fecha y hora actual en zona horaria de Colombia."""
+    return datetime.now(TZ_COL)
+
+
 # --- Ruta de la base de datos ---
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temperaturas.db")
 
@@ -24,6 +38,17 @@ st.set_page_config(
     page_title="Monitor de Temperaturas",
     page_icon="🌡️",
     layout="wide",
+)
+
+# --- Auto-refresco cada 10 minutos (600000 ms) ---
+st.markdown(
+    """
+    <script>
+        // Auto-refresco cada 10 minutos
+        setTimeout(function(){ window.location.reload(); }, 600000);
+    </script>
+    """,
+    unsafe_allow_html=True,
 )
 
 # --- Estilos ---
@@ -35,6 +60,10 @@ st.markdown("""
         background: #f8f9fa; border-radius: 8px;
         padding: 12px 16px; border-left: 4px solid #0d6efd;
     }
+    .clock-badge {
+        font-size: 0.85rem; color: #666; background: #f0f2f6;
+        padding: 4px 12px; border-radius: 12px; display: inline-block;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -44,7 +73,6 @@ st.markdown("""
 # ============================================================
 
 def hash_password(password: str) -> str:
-    """Genera hash SHA-256 de la contraseña."""
     return hashlib.sha256(password.encode()).hexdigest()
 
 
@@ -53,7 +81,6 @@ def hash_password(password: str) -> str:
 # ============================================================
 
 def get_conn():
-    """Retorna una conexión a SQLite."""
     return sqlite3.connect(DB_PATH)
 
 
@@ -61,7 +88,6 @@ def init_db() -> None:
     """Crea las tablas y carga datos iniciales si es la primera vez."""
     conn = get_conn()
 
-    # Tabla de registros
     conn.execute("""
         CREATE TABLE IF NOT EXISTS registros (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,7 +100,6 @@ def init_db() -> None:
         )
     """)
 
-    # Tabla de administrador (usuario único)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS admin (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -83,7 +108,6 @@ def init_db() -> None:
         )
     """)
 
-    # Insertar admin por defecto si no existe
     existe = conn.execute("SELECT COUNT(*) FROM admin").fetchone()[0]
     if existe == 0:
         conn.execute(
@@ -91,7 +115,7 @@ def init_db() -> None:
             ("admin", hash_password("admin123")),
         )
 
-    # Cargar datos iniciales del Excel si la tabla está vacía
+    # Cargar datos iniciales del Excel adjunto si la tabla está vacía
     registros_count = conn.execute("SELECT COUNT(*) FROM registros").fetchone()[0]
     if registros_count == 0:
         datos_iniciales = [
@@ -131,7 +155,7 @@ def obtener_registros() -> pd.DataFrame:
         "SELECT id, fecha AS Fecha, hora AS Hora, "
         "temp_motor_1 AS 'Temp Motor 1', temp_motor_2 AS 'Temp Motor 2', "
         "temp_motor_3 AS 'Temp Motor 3', temp_motor_4 AS 'Temp Motor 4' "
-        "FROM registros ORDER BY id ASC",
+        "FROM registros ORDER BY fecha ASC, hora ASC",
         conn,
     )
     conn.close()
@@ -170,9 +194,7 @@ def verificar_login(usuario: str, password: str) -> bool:
         "SELECT password_hash FROM admin WHERE usuario = ?", (usuario,)
     ).fetchone()
     conn.close()
-    if row and row[0] == hash_password(password):
-        return True
-    return False
+    return bool(row and row[0] == hash_password(password))
 
 
 def cambiar_credenciales(nuevo_usuario: str, nueva_password: str) -> None:
@@ -196,7 +218,6 @@ def obtener_usuario_admin() -> str:
 
 def generar_excel(df: pd.DataFrame) -> bytes:
     buffer = BytesIO()
-    # Excluir columna id si existe
     df_export = df.drop(columns=["id"], errors="ignore")
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         df_export.to_excel(writer, index=False, sheet_name="Temperaturas")
@@ -212,35 +233,41 @@ def generar_excel(df: pd.DataFrame) -> bytes:
 # ============================================================
 init_db()
 
-# Estado de sesión
 if "admin_logueado" not in st.session_state:
     st.session_state.admin_logueado = False
 if "vista" not in st.session_state:
     st.session_state.vista = "principal"
-if "editar_id" not in st.session_state:
-    st.session_state.editar_id = None
 if "confirmar_borrado_id" not in st.session_state:
     st.session_state.confirmar_borrado_id = None
 if "confirmar_borrado_todo" not in st.session_state:
     st.session_state.confirmar_borrado_todo = False
+if "reg_counter" not in st.session_state:
+    st.session_state.reg_counter = 0
 
 
 # ============================================================
-# BARRA SUPERIOR — LOGIN / ADMIN
+# BARRA SUPERIOR
 # ============================================================
 
-col_titulo, col_boton = st.columns([5, 1])
+col_titulo, col_reloj, col_boton = st.columns([4, 1.5, 1])
+
 with col_titulo:
     st.markdown('<p class="main-header">🌡️ Monitor de Temperaturas — Motores</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Registro y seguimiento de temperaturas operativas</p>', unsafe_allow_html=True)
 
+with col_reloj:
+    hora_col = ahora()
+    st.markdown(
+        f'<p class="clock-badge">🇨🇴 {hora_col.strftime("%Y-%m-%d  %H:%M")} COL<br>'
+        f'🔄 Auto-refresco: 10 min</p>',
+        unsafe_allow_html=True,
+    )
+
 with col_boton:
     if st.session_state.admin_logueado:
-        # Mostrar menú admin
         if st.session_state.vista == "admin":
             if st.button("📊 Vista principal", use_container_width=True):
                 st.session_state.vista = "principal"
-                st.session_state.editar_id = None
                 st.rerun()
         else:
             if st.button("⚙️ Panel Admin", use_container_width=True):
@@ -249,7 +276,6 @@ with col_boton:
         if st.button("🚪 Cerrar sesión", use_container_width=True):
             st.session_state.admin_logueado = False
             st.session_state.vista = "principal"
-            st.session_state.editar_id = None
             st.rerun()
     else:
         if st.button("🔐 Admin", use_container_width=True):
@@ -288,16 +314,15 @@ if st.session_state.vista == "login" and not st.session_state.admin_logueado:
 
 
 # ============================================================
-# VISTA: PANEL ADMIN (CRUD completo)
+# VISTA: PANEL ADMIN
 # ============================================================
 
 if st.session_state.vista == "admin" and st.session_state.admin_logueado:
     st.divider()
 
-    # --- Tabs del panel admin ---
     tab_datos, tab_crear, tab_config = st.tabs(["📋 Gestionar registros", "➕ Crear registro", "⚙️ Configuración"])
 
-    # --- TAB 1: Gestionar registros (Read, Update, Delete) ---
+    # --- TAB 1: Gestionar registros ---
     with tab_datos:
         st.subheader("Registros en base de datos")
         df_admin = obtener_registros()
@@ -305,58 +330,52 @@ if st.session_state.vista == "admin" and st.session_state.admin_logueado:
         if df_admin.empty:
             st.info("No hay registros en la base de datos.")
         else:
-            # Mostrar tabla
-            st.dataframe(
-                df_admin.drop(columns=["id"]),
-                use_container_width=True,
-                hide_index=False,
-            )
+            st.dataframe(df_admin.drop(columns=["id"]), use_container_width=True, hide_index=False)
 
             st.divider()
 
-            # --- Editar registro individual ---
+            # --- Editar registro ---
             st.markdown("##### ✏️ Editar registro")
             opciones = {f"#{row['id']} — {row['Fecha']} {row['Hora']}": row["id"] for _, row in df_admin.iterrows()}
-            seleccion_editar = st.selectbox("Selecciona un registro para editar", options=list(opciones.keys()), key="sel_editar")
-            id_seleccionado = opciones[seleccion_editar]
+            seleccion_editar = st.selectbox("Selecciona un registro", options=list(opciones.keys()), key="sel_editar")
+            id_sel = opciones[seleccion_editar]
 
-            # Obtener datos actuales del registro
-            reg_actual = df_admin[df_admin["id"] == id_seleccionado].iloc[0]
+            reg = df_admin[df_admin["id"] == id_sel].iloc[0]
 
-            # Resumen visual del registro seleccionado
+            # Resumen del registro seleccionado
             st.info(
-                f"📌 **Registro #{id_seleccionado}** — "
-                f"Fecha: {reg_actual['Fecha']} | Hora: {reg_actual['Hora']} | "
-                f"M1: {reg_actual['Temp Motor 1']:.1f}°C | "
-                f"M2: {reg_actual['Temp Motor 2']:.1f}°C | "
-                f"M3: {reg_actual['Temp Motor 3']:.1f}°C | "
-                f"M4: {reg_actual['Temp Motor 4']:.1f}°C"
+                f"📌 **Registro #{id_sel}** — "
+                f"Fecha: {reg['Fecha']} | Hora: {reg['Hora']} | "
+                f"M1: {reg['Temp Motor 1']:.1f}°C | "
+                f"M2: {reg['Temp Motor 2']:.1f}°C | "
+                f"M3: {reg['Temp Motor 3']:.1f}°C | "
+                f"M4: {reg['Temp Motor 4']:.1f}°C"
             )
 
-            # Claves dinámicas para que los campos se actualicen al cambiar de registro
-            k = f"_{id_seleccionado}"
+            # Claves dinámicas por ID para que se actualicen los campos
+            k = f"_{id_sel}"
 
             col_ef, col_eh = st.columns(2)
             with col_ef:
                 try:
-                    fecha_edit = st.date_input("Fecha", value=datetime.strptime(reg_actual["Fecha"], "%Y-%m-%d").date(), key=f"edit_fecha{k}")
+                    fecha_edit = st.date_input("Fecha", value=datetime.strptime(reg["Fecha"], "%Y-%m-%d").date(), key=f"ef{k}")
                 except Exception:
-                    fecha_edit = st.date_input("Fecha", value=date.today(), key=f"edit_fecha{k}")
+                    fecha_edit = st.date_input("Fecha", value=ahora().date(), key=f"ef{k}")
             with col_eh:
-                hora_edit = st.text_input("Hora (HH:MM)", value=reg_actual["Hora"], max_chars=5, key=f"edit_hora{k}")
+                hora_edit = st.text_input("Hora (HH:MM)", value=reg["Hora"], max_chars=5, key=f"eh{k}")
 
             ce1, ce2, ce3, ce4 = st.columns(4)
             with ce1:
-                t1_edit = st.number_input("Motor 1", value=float(reg_actual["Temp Motor 1"]), step=0.1, format="%.1f", key=f"edit_t1{k}")
+                t1_e = st.number_input("Motor 1", value=float(reg["Temp Motor 1"]), step=0.1, format="%.1f", key=f"et1{k}")
             with ce2:
-                t2_edit = st.number_input("Motor 2", value=float(reg_actual["Temp Motor 2"]), step=0.1, format="%.1f", key=f"edit_t2{k}")
+                t2_e = st.number_input("Motor 2", value=float(reg["Temp Motor 2"]), step=0.1, format="%.1f", key=f"et2{k}")
             with ce3:
-                t3_edit = st.number_input("Motor 3", value=float(reg_actual["Temp Motor 3"]), step=0.1, format="%.1f", key=f"edit_t3{k}")
+                t3_e = st.number_input("Motor 3", value=float(reg["Temp Motor 3"]), step=0.1, format="%.1f", key=f"et3{k}")
             with ce4:
-                t4_edit = st.number_input("Motor 4", value=float(reg_actual["Temp Motor 4"]), step=0.1, format="%.1f", key=f"edit_t4{k}")
+                t4_e = st.number_input("Motor 4", value=float(reg["Temp Motor 4"]), step=0.1, format="%.1f", key=f"et4{k}")
 
-            col_guardar, col_eliminar = st.columns(2)
-            with col_guardar:
+            col_g, col_d = st.columns(2)
+            with col_g:
                 if st.button("💾 Guardar cambios", type="primary", use_container_width=True):
                     if not re.match(r"^\d{1,2}:\d{2}$", hora_edit):
                         st.error("❌ Formato de hora inválido.")
@@ -365,25 +384,24 @@ if st.session_state.vista == "admin" and st.session_state.admin_logueado:
                         if h > 23 or m > 59:
                             st.error("❌ Hora fuera de rango.")
                         else:
-                            actualizar_registro(id_seleccionado, fecha_edit.strftime("%Y-%m-%d"), f"{h:02d}:{m:02d}", t1_edit, t2_edit, t3_edit, t4_edit)
+                            actualizar_registro(id_sel, fecha_edit.strftime("%Y-%m-%d"), f"{h:02d}:{m:02d}", t1_e, t2_e, t3_e, t4_e)
                             st.success("✅ Registro actualizado.")
                             st.rerun()
 
-            with col_eliminar:
+            with col_d:
                 if st.button("🗑️ Eliminar este registro", type="secondary", use_container_width=True):
-                    st.session_state.confirmar_borrado_id = id_seleccionado
+                    st.session_state.confirmar_borrado_id = id_sel
 
-            if st.session_state.confirmar_borrado_id == id_seleccionado:
-                st.warning(f"¿Eliminar registro #{id_seleccionado}? Esta acción no se puede deshacer.")
+            if st.session_state.confirmar_borrado_id == id_sel:
+                st.warning(f"¿Eliminar registro #{id_sel}? No se puede deshacer.")
                 cc1, cc2 = st.columns(2)
                 with cc1:
-                    if st.button("✅ Sí, eliminar", key="confirm_del"):
-                        eliminar_registro(id_seleccionado)
+                    if st.button("✅ Sí, eliminar", key="cdel"):
+                        eliminar_registro(id_sel)
                         st.session_state.confirmar_borrado_id = None
-                        st.success("Registro eliminado.")
                         st.rerun()
                 with cc2:
-                    if st.button("❌ Cancelar", key="cancel_del"):
+                    if st.button("❌ Cancelar", key="ccan"):
                         st.session_state.confirmar_borrado_id = None
                         st.rerun()
 
@@ -395,40 +413,40 @@ if st.session_state.vista == "admin" and st.session_state.admin_logueado:
                 st.session_state.confirmar_borrado_todo = True
 
             if st.session_state.confirmar_borrado_todo:
-                st.error("⚠️ ¿Estás seguro? Se eliminarán TODOS los registros permanentemente.")
+                st.error("⚠️ ¿Eliminar TODOS los registros permanentemente?")
                 cd1, cd2 = st.columns(2)
                 with cd1:
-                    if st.button("✅ Confirmar eliminación total", key="confirm_all"):
+                    if st.button("✅ Confirmar", key="call"):
                         eliminar_todos()
                         st.session_state.confirmar_borrado_todo = False
-                        st.success("Todos los registros eliminados.")
                         st.rerun()
                 with cd2:
-                    if st.button("❌ Cancelar", key="cancel_all"):
+                    if st.button("❌ Cancelar", key="ccall"):
                         st.session_state.confirmar_borrado_todo = False
                         st.rerun()
 
     # --- TAB 2: Crear registro ---
     with tab_crear:
         st.subheader("Crear nuevo registro")
+        rc = st.session_state.reg_counter
 
         col_nf, col_nh = st.columns(2)
         with col_nf:
-            nueva_fecha = st.date_input("Fecha", value=date.today(), key="new_fecha")
+            nueva_fecha = st.date_input("Fecha", value=ahora().date(), key=f"nf_{rc}")
         with col_nh:
-            nueva_hora = st.text_input("Hora (HH:MM)", value=datetime.now().strftime("%H:%M"), max_chars=5, key="new_hora")
+            nueva_hora = st.text_input("Hora (HH:MM)", value=ahora().strftime("%H:%M"), max_chars=5, key=f"nh_{rc}")
 
         cn1, cn2, cn3, cn4 = st.columns(4)
         with cn1:
-            nt1 = st.number_input("Motor 1 (°C)", value=0.0, step=0.1, format="%.1f", key="new_t1")
+            nt1 = st.number_input("Motor 1 (°C)", value=0.0, step=0.1, format="%.1f", key=f"nt1_{rc}")
         with cn2:
-            nt2 = st.number_input("Motor 2 (°C)", value=0.0, step=0.1, format="%.1f", key="new_t2")
+            nt2 = st.number_input("Motor 2 (°C)", value=0.0, step=0.1, format="%.1f", key=f"nt2_{rc}")
         with cn3:
-            nt3 = st.number_input("Motor 3 (°C)", value=0.0, step=0.1, format="%.1f", key="new_t3")
+            nt3 = st.number_input("Motor 3 (°C)", value=0.0, step=0.1, format="%.1f", key=f"nt3_{rc}")
         with cn4:
-            nt4 = st.number_input("Motor 4 (°C)", value=0.0, step=0.1, format="%.1f", key="new_t4")
+            nt4 = st.number_input("Motor 4 (°C)", value=0.0, step=0.1, format="%.1f", key=f"nt4_{rc}")
 
-        if st.button("📥 Crear registro", type="primary", use_container_width=True, key="btn_crear_admin"):
+        if st.button("📥 Crear registro", type="primary", use_container_width=True, key="btn_crear"):
             if not re.match(r"^\d{1,2}:\d{2}$", nueva_hora):
                 st.error("❌ Formato de hora inválido.")
             else:
@@ -437,16 +455,17 @@ if st.session_state.vista == "admin" and st.session_state.admin_logueado:
                     st.error("❌ Hora fuera de rango.")
                 else:
                     insertar_registro(nueva_fecha.strftime("%Y-%m-%d"), f"{h:02d}:{m:02d}", nt1, nt2, nt3, nt4)
-                    st.success("✅ Registro creado exitosamente.")
-
                     alertas = []
                     for nombre, valor in [("Motor 1", nt1), ("Motor 2", nt2), ("Motor 3", nt3), ("Motor 4", nt4)]:
                         if valor > 100:
                             alertas.append(f"**{nombre}**: {valor:.1f} °C")
                     if alertas:
                         st.warning(f"⚠️ Temperatura crítica: {', '.join(alertas)}")
+                    st.success("✅ Registro creado.")
+                    st.session_state.reg_counter += 1
+                    st.rerun()
 
-    # --- TAB 3: Configuración (cambiar credenciales) ---
+    # --- TAB 3: Configuración ---
     with tab_config:
         st.subheader("Cambiar credenciales de administrador")
 
@@ -457,64 +476,59 @@ if st.session_state.vista == "admin" and st.session_state.admin_logueado:
         nueva_pass = st.text_input("Nueva contraseña", type="password", key="cfg_pass1")
         confirmar_pass = st.text_input("Confirmar contraseña", type="password", key="cfg_pass2")
 
-        if st.button("💾 Guardar credenciales", type="primary", key="btn_save_creds"):
+        if st.button("💾 Guardar credenciales", type="primary", key="btn_creds"):
             if not nuevo_usuario.strip():
                 st.error("❌ El usuario no puede estar vacío.")
             elif not nueva_pass:
                 st.error("❌ La contraseña no puede estar vacía.")
             elif len(nueva_pass) < 4:
-                st.error("❌ La contraseña debe tener al menos 4 caracteres.")
+                st.error("❌ Mínimo 4 caracteres.")
             elif nueva_pass != confirmar_pass:
                 st.error("❌ Las contraseñas no coinciden.")
             else:
                 cambiar_credenciales(nuevo_usuario.strip(), nueva_pass)
-                st.success("✅ Credenciales actualizadas correctamente.")
+                st.success("✅ Credenciales actualizadas.")
 
     st.stop()
 
 
 # ============================================================
-# VISTA PRINCIPAL (usuarios normales)
+# VISTA PRINCIPAL
 # ============================================================
 
-# --- Formulario de captura ---
 with st.container():
     st.subheader("Registrar lecturas")
+    rc = st.session_state.reg_counter
 
+    # Fecha y hora automáticas (solo lectura, hora Colombia)
     col_fecha, col_hora = st.columns(2)
     with col_fecha:
-        fecha_sel = st.date_input("📅 Fecha", value=date.today())
+        st.text_input("📅 Fecha (automática)", value=ahora().strftime("%Y-%m-%d"), disabled=True)
     with col_hora:
-        hora_sel = st.text_input("🕐 Hora (HH:MM)", value=datetime.now().strftime("%H:%M"), max_chars=5)
+        st.text_input("🕐 Hora (automática)", value=ahora().strftime("%H:%M"), disabled=True)
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        temp1 = st.number_input("Temperatura Motor 1 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f")
+        temp1 = st.number_input("Temperatura Motor 1 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f", key=f"mt1_{rc}")
     with col2:
-        temp2 = st.number_input("Temperatura Motor 2 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f")
+        temp2 = st.number_input("Temperatura Motor 2 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f", key=f"mt2_{rc}")
     with col3:
-        temp3 = st.number_input("Temperatura Motor 3 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f")
+        temp3 = st.number_input("Temperatura Motor 3 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f", key=f"mt3_{rc}")
     with col4:
-        temp4 = st.number_input("Temperatura Motor 4 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f")
+        temp4 = st.number_input("Temperatura Motor 4 (°C)", min_value=-50.0, max_value=500.0, value=0.0, step=0.1, format="%.1f", key=f"mt4_{rc}")
 
     if st.button("📥 Registrar", type="primary", use_container_width=True):
-        if not re.match(r"^\d{1,2}:\d{2}$", hora_sel):
-            st.error("❌ Formato de hora inválido. Usa HH:MM (ejemplo: 08:30)")
-        else:
-            h, m = int(hora_sel.split(":")[0]), int(hora_sel.split(":")[1])
-            if h > 23 or m > 59:
-                st.error("❌ Hora fuera de rango. Horas: 0-23, Minutos: 0-59")
-            else:
-                hora_formateada = f"{h:02d}:{m:02d}"
-                insertar_registro(fecha_sel.strftime("%Y-%m-%d"), hora_formateada, temp1, temp2, temp3, temp4)
-                st.success("✅ Lectura registrada y guardada.")
-
-                alertas = []
-                for nombre, valor in [("Motor 1", temp1), ("Motor 2", temp2), ("Motor 3", temp3), ("Motor 4", temp4)]:
-                    if valor > 100:
-                        alertas.append(f"**{nombre}**: {valor:.1f} °C")
-                if alertas:
-                    st.warning(f"⚠️ Temperatura crítica detectada en: {', '.join(alertas)}")
+        momento = ahora()
+        insertar_registro(momento.strftime("%Y-%m-%d"), momento.strftime("%H:%M"), temp1, temp2, temp3, temp4)
+        alertas = []
+        for nombre, valor in [("Motor 1", temp1), ("Motor 2", temp2), ("Motor 3", temp3), ("Motor 4", temp4)]:
+            if valor > 100:
+                alertas.append(f"**{nombre}**: {valor:.1f} °C")
+        if alertas:
+            st.warning(f"⚠️ Temperatura crítica detectada en: {', '.join(alertas)}")
+        st.success("✅ Lectura registrada y guardada.")
+        st.session_state.reg_counter += 1
+        st.rerun()
 
 st.divider()
 
@@ -524,7 +538,6 @@ df = obtener_registros()
 if df.empty:
     st.info("Aún no hay registros. Ingresa las temperaturas y presiona **Registrar**.")
 else:
-    # Métricas del último registro
     ultimo = df.iloc[-1]
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Motor 1", f"{ultimo['Temp Motor 1']:.1f} °C")
@@ -534,13 +547,11 @@ else:
 
     st.divider()
 
-    # --- Tabla ---
     st.subheader("Historial de registros")
     st.dataframe(df.drop(columns=["id"]), use_container_width=True, hide_index=True)
 
     st.divider()
 
-    # --- Gráfica ---
     st.subheader("Gráfica de temperaturas")
 
     columnas_motor = ["Temp Motor 1", "Temp Motor 2", "Temp Motor 3", "Temp Motor 4"]
@@ -566,7 +577,7 @@ else:
                 marker=dict(size=6),
             ))
         fig.update_layout(
-            xaxis_title="Fecha y hora", yaxis_title="Temperatura (°C)",
+            xaxis_title="Fecha y hora (COL)", yaxis_title="Temperatura (°C)",
             legend_title="Motor", template="plotly_white",
             height=420, margin=dict(l=40, r=20, t=30, b=40),
             hovermode="x unified",
@@ -577,10 +588,9 @@ else:
 
     st.divider()
 
-    # --- Exportar ---
     st.subheader("Exportar datos")
     archivo_xlsx = generar_excel(df)
-    nombre_archivo = f"temperaturas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    nombre_archivo = f"temperaturas_{ahora().strftime('%Y%m%d_%H%M%S')}.xlsx"
     st.download_button(
         label="📊 Descargar Excel", data=archivo_xlsx,
         file_name=nombre_archivo,
